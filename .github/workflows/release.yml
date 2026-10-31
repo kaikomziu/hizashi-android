@@ -1,0 +1,75 @@
+name: release
+
+# タグ（v0.1.0 など）を push すると、署名した APK をビルドして GitHub Releases に載せる
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: 署名鍵を用意する
+        env:
+          KEYSTORE_B64: ${{ secrets.HIZASHI_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64" || { echo "HIZASHI_KEYSTORE_B64 が未設定です"; exit 1; }
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/hizashi-release.jks"
+
+      - name: リリース版をビルド
+        env:
+          HIZASHI_KEYSTORE: ${{ runner.temp }}/hizashi-release.jks
+          HIZASHI_KEYSTORE_PASSWORD: ${{ secrets.HIZASHI_KEYSTORE_PASSWORD }}
+          HIZASHI_KEY_ALIAS: hizashi
+          HIZASHI_KEY_PASSWORD: ${{ secrets.HIZASHI_KEYSTORE_PASSWORD }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          gradle assembleRelease -PversionName="$VER" -PversionCode="${{ github.run_number }}" --stacktrace
+
+      - name: APK を検証して名前を付ける
+        env:
+          HIZASHI_KEYSTORE_PASSWORD: ${{ secrets.HIZASHI_KEYSTORE_PASSWORD }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          SRC=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          mkdir -p dist
+          cp "$SRC" "dist/Hizashi-$VER.apk"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "dist/Hizashi-$VER.apk" | tee dist/signature.txt
+          (cd dist && sha256sum "Hizashi-$VER.apk" > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: リリースを作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          SHA=$(cut -d' ' -f1 dist/SHA256SUMS.txt)
+          NOTES=$(awk -v v="$VER" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md)
+          {
+            echo "$NOTES"
+            echo
+            echo "## インストール"
+            echo "1. \`Hizashi-$VER.apk\` をダウンロードして開く"
+            echo "2. 「提供元不明のアプリ」の許可を求められたら、ブラウザ（またはファイル管理アプリ）に対して許可する"
+            echo "3. インストールして起動"
+            echo
+            echo "SHA-256: \`$SHA\`"
+            echo
+            echo "※ Google Play には出していません。署名は個人の鍵で、Play プロテクトが「不明なアプリ」と表示することがあります。"
+          } > release-notes.md
+          FLAG=""
+          case "$VER" in 0.*) FLAG="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" $FLAG --title "Hizashi Android $VER" --notes-file release-notes.md \
+            "dist/Hizashi-$VER.apk" dist/SHA256SUMS.txt
