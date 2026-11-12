@@ -157,7 +157,7 @@ object Updater {
     fun summarize(notes: String): String {
         val lines = notes.replace("\r", "").lines().map { it.trim() }
             .filter { it.startsWith("- ") || it.startsWith("* ") }
-            .map { "・" + it.substring(2).replace("`", "") }
+            .map { "・" + it.substring(2).replace("`", "").replace("**", "") }
             .take(6)
             .map { if (it.length > 60) it.take(60) + "…" else it }
         return if (lines.isEmpty()) "" else "更新の内容:\n" + lines.joinToString("\n")
