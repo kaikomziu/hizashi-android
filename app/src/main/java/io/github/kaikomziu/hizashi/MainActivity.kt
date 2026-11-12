@@ -23,6 +23,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.Message
+import android.provider.Settings
 import android.text.InputType
 import android.text.TextUtils
 import android.util.TypedValue
@@ -60,12 +61,14 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.webkit.WebViewAssetLoader
 import org.json.JSONArray
 import java.io.ByteArrayInputStream
+import java.io.File
 
 private const val INTERNAL_HOST = "hizashi.invalid"
 private const val NEWTAB_URL = "https://hizashi.invalid/newtab.html"
@@ -154,6 +157,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = Store(this)
+        File(cacheDir, "updates").deleteRecursively() // 前回の更新用ファイルを片付ける
 
         val base = WebSettings.getDefaultUserAgent(this)
         // 「; wv」と「Version/4.0」を外して、Chrome の名乗りに揃える
@@ -1320,10 +1324,116 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
                     "・履歴・ブックマークなどは、この端末の中にだけ保存されます（送信しません）\n\n" +
                     "MIT ライセンス / 個人開発"
             )
-            .setPositiveButton("公式サイト") { _, _ -> newTab(SITE_URL) }
-            .setNeutralButton("ソースコード") { _, _ -> newTab(REPO_URL) }
+            .setPositiveButton("更新を確認") { _, _ -> checkForUpdate() }
+            .setNeutralButton("公式サイト") { _, _ -> newTab(SITE_URL) }
             .setNegativeButton("閉じる", null)
             .show()
+    }
+
+    // ================================================================ 更新（GitHub のリリースを見て、新しい版に入れ替える）
+    private var updating = false
+
+    @Suppress("DEPRECATION")
+    private fun currentVersionName(): String =
+        try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (e: Exception) { "" }
+
+    private fun checkForUpdate() {
+        if (updating) {
+            toast("更新を処理しています")
+            return
+        }
+        updating = true
+        toast("更新を確認しています…")
+        Thread {
+            try {
+                val rel = Updater.fetchLatest()
+                runOnUiThread {
+                    updating = false
+                    onUpdateInfo(rel)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    updating = false
+                    toast("更新を確認できませんでした（ネットワークを確認してください）")
+                }
+            }
+        }.start()
+    }
+
+    private fun onUpdateInfo(rel: Updater.Release) {
+        val cur = Updater.parseVersion(currentVersionName()) ?: listOf(0)
+        if (!Updater.isNewer(rel.version, cur)) {
+            toast("最新版です（v${currentVersionName()}）")
+            return
+        }
+        val notes = Updater.summarize(rel.notes)
+        AlertDialog.Builder(this)
+            .setTitle("新しい版 v${rel.versionName} があります")
+            .setMessage(
+                "いまは v${currentVersionName()} です。更新しますか？\n" +
+                    "（ダウンロードして、Android のインストール画面を開きます。開いているタブは、更新後も残ります）" +
+                    (if (notes.isEmpty()) "" else "\n\n$notes")
+            )
+            .setPositiveButton("更新する") { _, _ -> downloadUpdate(rel) }
+            .setNeutralButton("リリースページ") { _, _ -> newTab(rel.pageUrl) }
+            .setNegativeButton("あとで", null)
+            .show()
+    }
+
+    private fun downloadUpdate(rel: Updater.Release) {
+        if (updating) return
+        updating = true
+        saveSession()
+        val dest = File(File(cacheDir, "updates"), rel.apkName)
+        toast("ダウンロードを始めます…")
+        Thread {
+            try {
+                var last = -20
+                Updater.download(rel, dest) { p ->
+                    if (p >= last + 20 || p == 100) {
+                        last = p
+                        runOnUiThread { toast("ダウンロード中… $p%") }
+                    }
+                }
+                runOnUiThread {
+                    updating = false
+                    installApk(dest)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    updating = false
+                    toast("更新できませんでした: " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+        }.start()
+    }
+
+    private fun installApk(f: File) {
+        if (!packageManager.canRequestPackageInstalls()) {
+            AlertDialog.Builder(this)
+                .setTitle("インストールの許可が必要です")
+                .setMessage("次の画面で「このアプリからのインストールを許可」をオンにして戻り、もう一度「更新を確認」を押してください。")
+                .setPositiveButton("設定を開く") { _, _ ->
+                    try {
+                        startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    } catch (e: Exception) {
+                        toast("設定を開けませんでした")
+                    }
+                }
+                .setNegativeButton("やめる", null)
+                .show()
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
+            val i = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(i)
+        } catch (e: Exception) {
+            toast("インストール画面を開けませんでした")
+        }
     }
 
     private fun toggleSetting(name: String, get: () -> Boolean, set: (Boolean) -> Unit) {
@@ -1400,6 +1510,7 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
         },
         Cmd("検索エンジンを変更", "") { chooseEngine() },
         Cmd("閲覧データ（Cookie・キャッシュ）を削除", "") { clearBrowsingData() },
+        Cmd("更新を確認（GitHub）", "新しい版があれば、ダウンロードして更新") { checkForUpdate() },
         Cmd("Hizashi について", "") { showAbout() },
     )
 
@@ -1407,7 +1518,7 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
         "新しいタブ", "タブ一覧", "ブックマークに追加 / 解除", "ブックマーク一覧", "履歴を開く",
         "ページ内検索", "リーダーモード", "要素ブロッカー（タップした要素を消す）",
         "このサイトを強制ダークモード（切替）", "PC版サイトで表示（切替）", "共有",
-        "ダウンロードを開く", "Hizashi について",
+        "ダウンロードを開く", "更新を確認（GitHub）", "Hizashi について",
     )
 
     private fun showMenu() {
@@ -1507,6 +1618,9 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
             dlg.dismiss()
             tabs.getOrNull(pos)?.let { show(it) }
         }
+        // タブが多いときは一覧をスクロールできる。開いたときは、いまのタブの位置まで動かしておく
+        list.isVerticalScrollBarEnabled = true
+        list.post { list.setSelection(tabs.indexOf(cur).coerceAtLeast(0)) }
         val footer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         footer.addView(barButton("＋ 新しいタブ") {
             dlg.dismiss()
