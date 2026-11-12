@@ -33,6 +33,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
+import android.view.autofill.AutofillManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
@@ -281,6 +282,7 @@ class MainActivity : ComponentActivity() {
         }
         address = EditText(this).apply {
             hint = "検索 または URL を入力"
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             setHintTextColor(SUB)
             setTextColor(TEXT)
             textSize = 15f
@@ -329,6 +331,7 @@ class MainActivity : ComponentActivity() {
         }
         findInput = EditText(this).apply {
             hint = "ページ内を検索"
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             setHintTextColor(SUB)
             setTextColor(TEXT)
             textSize = 15f
@@ -604,6 +607,7 @@ class MainActivity : ComponentActivity() {
         val w = WebView(this)
         t.web = w
         w.setBackgroundColor(BG)
+        w.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_YES
         val s = w.settings
         s.javaScriptEnabled = true
         s.domStorageEnabled = true
@@ -1330,6 +1334,51 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
             .show()
     }
 
+
+    // ================================================================ パスワードの自動入力（端末の自動入力サービス = Google パスワードマネージャーなど）
+    // Hizashi はパスワードを自分では保存しない。端末の「自動入力サービス」に Google を選べば、
+    // WebView のログイン欄に、Google パスワードマネージャーの候補が出て、保存もそちらで行われる
+    private fun setupAutofill() {
+        val afm = getSystemService(AutofillManager::class.java)
+        val supported = afm?.isAutofillSupported == true
+        val enabled = afm?.hasEnabledAutofillServices() == true
+        val message = when {
+            !supported -> "この端末は、自動入力に対応していません。"
+            enabled -> "端末の自動入力サービスが有効です。サービスに Google を選んでいれば、ログイン欄をタップすると Google パスワードマネージャーの候補が出ます。ログインしたあとに保存の確認が出たら「保存」を押すと、Google に保存されます。\n\n※ Hizashi は、パスワードを自分では保存しません。\n※ サイトによっては、候補が出ないことがあります（Hizashi が「対応ブラウザ」として登録されていない場合など）。"
+            else -> "自動入力サービスが選ばれていません。「設定する」を押して「Google」を選ぶと、Hizashi のログイン画面でも Google パスワードマネージャーを使えるようになります。\n\n※ Hizashi は、パスワードを自分では保存しません。"
+        }
+        val b = AlertDialog.Builder(this)
+            .setTitle("パスワードの自動入力")
+            .setMessage(message)
+            .setNeutralButton("パスワードを管理（Google）") { _, _ -> openPasswordManager() }
+            .setNegativeButton("閉じる", null)
+        if (supported) b.setPositiveButton(if (enabled) "設定を開く" else "設定する") { _, _ -> openAutofillSettings() }
+        b.show()
+    }
+
+    private fun openAutofillSettings() {
+        try {
+            // 「Google」（Google Play 開発者サービスの自動入力）を選んだ状態で、選択画面を開く
+            startActivity(Intent(Settings.ACTION_REQUEST_SET_AUTOFILL_SERVICE, Uri.parse("package:com.google.android.gms")))
+        } catch (e: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_SETTINGS))
+            } catch (e2: Exception) {
+                toast("設定を開けませんでした")
+            }
+        }
+    }
+
+    // Google パスワードマネージャーのサイトは、ここでは開かず、ふだん使っているブラウザで開く
+    // （Hizashi での Google へのログインは、うまくいかないことがあるため）
+    private fun openPasswordManager() {
+        try {
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse("https://passwords.google.com/")), "開くアプリを選ぶ"))
+        } catch (e: Exception) {
+            toast("開けませんでした")
+        }
+    }
+
     // ================================================================ 更新（GitHub のリリースを見て、新しい版に入れ替える）
     private var updating = false
 
@@ -1510,6 +1559,8 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
         },
         Cmd("検索エンジンを変更", "") { chooseEngine() },
         Cmd("閲覧データ（Cookie・キャッシュ）を削除", "") { clearBrowsingData() },
+        Cmd("パスワードの自動入力を設定（Google など）", "端末の自動入力サービスを使う") { setupAutofill() },
+        Cmd("Google パスワードマネージャーを開く（ほかのブラウザで）", "passwords.google.com") { openPasswordManager() },
         Cmd("更新を確認（GitHub）", "新しい版があれば、ダウンロードして更新") { checkForUpdate() },
         Cmd("Hizashi について", "") { showAbout() },
     )
@@ -1518,7 +1569,7 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
         "新しいタブ", "タブ一覧", "ブックマークに追加 / 解除", "ブックマーク一覧", "履歴を開く",
         "ページ内検索", "リーダーモード", "要素ブロッカー（タップした要素を消す）",
         "このサイトを強制ダークモード（切替）", "PC版サイトで表示（切替）", "共有",
-        "ダウンロードを開く", "更新を確認（GitHub）", "Hizashi について",
+        "ダウンロードを開く", "パスワードの自動入力を設定（Google など）", "更新を確認（GitHub）", "Hizashi について",
     )
 
     private fun showMenu() {
@@ -1703,6 +1754,7 @@ f();setInterval(function(){if(s>0){s--;f();}},1000);
         }
         val input = EditText(this).apply {
             hint = "コマンド・タブ・ブックマーク・履歴、URL、計算"
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             setHintTextColor(SUB)
             setTextColor(TEXT)
             textSize = 16f
